@@ -1,0 +1,286 @@
+/* -------------------------------------------------------------------
+   distributedkv console — SRE / NOC terminal aesthetic.
+   Reference points: Bloomberg terminal, k9s, htop, glances, the old
+   Sun Microsystems boot screens. Phosphor green on hard black, CRT
+   scanlines, blink-on-blink-off cursor on the title bar.
+   ------------------------------------------------------------------- */
+
+:root {
+  --black:     #000000;
+  --bg:        #050807;
+  --bg-2:      #0a0e0c;
+  --bg-3:      #11141a;
+  --panel:     #0c1410;
+  --line:      #1d2925;
+  --line-2:    #294035;
+  --rule:      #1a2b22;
+
+  --green:     #4adc92;
+  --green-dim: #2a8159;
+  --green-glow: rgba(74, 220, 146, 0.18);
+
+  --amber:     #ffb454;       /* warning */
+  --red:       #ff5c5c;       /* alert */
+  --cyan:      #4ad6dc;       /* info */
+  --grey:      #5a6a64;
+  --grey-2:    #94a3a0;
+  --white:     #d8e8e2;
+
+  --mono: "Berkeley Mono", "JetBrains Mono", ui-monospace, Menlo, monospace;
+
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0; padding: 0;
+  background: var(--bg);
+  color: var(--green);
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.4;
+  height: 100%;
+  overflow: hidden;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* CRT scanlines + faint phosphor glow over the entire screen. */
+body::before {
+  content: "";
+  position: fixed; inset: 0;
+  background:
+    repeating-linear-gradient(
+      0deg,
+      rgba(74, 220, 146, 0.025) 0,
+      rgba(74, 220, 146, 0.025) 1px,
+      transparent 1px,
+      transparent 3px),
+    radial-gradient(ellipse at center, transparent 50%, rgba(0,0,0,0.6) 130%);
+  pointer-events: none;
+  z-index: 1000;
+  mix-blend-mode: screen;
+}
+/* Subtle vignette + flicker. */
+body::after {
+  content: "";
+  position: fixed; inset: 0;
+  background: rgba(74, 220, 146, 0.012);
+  pointer-events: none;
+  animation: flicker 5s steps(20, end) infinite;
+  z-index: 1001;
+}
+@keyframes flicker {
+  0%, 100% { opacity: 1; }
+  10%      { opacity: 0.85; }
+  30%      { opacity: 1; }
+  60%      { opacity: 0.92; }
+}
+
+#screen {
+  height: 100vh;
+  display: grid;
+  grid-template-rows: 28px 32px 1fr 22px;
+  padding: 0;
+}
+
+/* ---- chrome -------------------------------------------------------- */
+
+.titlebar {
+  background: var(--green);
+  color: var(--black);
+  padding: 0 14px;
+  display: flex; align-items: center;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  font-size: 12px;
+  gap: 16px;
+}
+.titlebar .blink {
+  animation: blink 1s steps(2, end) infinite;
+}
+@keyframes blink {
+  to { visibility: hidden; }
+}
+.titlebar .right { margin-left: auto; display: flex; gap: 24px; }
+
+.menubar {
+  background: var(--bg-2);
+  border-bottom: 1px solid var(--line);
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  gap: 24px;
+  font-size: 11px;
+  color: var(--grey-2);
+}
+.menubar b { color: var(--green); margin-right: 6px; font-weight: 700; }
+.menubar .pill {
+  border: 1px solid var(--green-dim);
+  padding: 1px 8px;
+  font-size: 10px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--green);
+}
+.menubar .pill.warn  { border-color: var(--amber); color: var(--amber); }
+.menubar .pill.alert { border-color: var(--red);   color: var(--red); }
+
+/* ---- main grid ----------------------------------------------------- */
+
+.grid {
+  display: grid;
+  grid-template-columns: 1.1fr 1fr;
+  grid-template-rows: 1fr 1fr;
+  gap: 1px;
+  background: var(--line);
+  border-bottom: 1px solid var(--line);
+  overflow: hidden;
+}
+.panel {
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  position: relative;
+}
+.panel header {
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  padding: 6px 12px;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 10.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--green-dim);
+}
+.panel header .id {
+  color: var(--green);
+}
+.panel .body {
+  padding: 12px;
+  overflow: auto;
+  flex: 1 1 auto;
+}
+
+/* ---- topology table ----------------------------------------------- */
+
+table.topo {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 12px;
+  color: var(--white);
+}
+table.topo th, table.topo td {
+  text-align: left;
+  padding: 5px 10px;
+  border-bottom: 1px solid var(--rule);
+  font-weight: 400;
+}
+table.topo th {
+  font-size: 9.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--grey);
+  font-weight: 700;
+}
+table.topo tr.leader  td:first-child::before { content: "▸ "; color: var(--green); }
+table.topo tr.leader  td.role { color: var(--green); font-weight: 700; }
+table.topo tr.dead    td.role { color: var(--red);   font-weight: 700; }
+table.topo tr.dead    td      { color: var(--grey); text-decoration: line-through; }
+
+/* ---- ascii topology graph ----------------------------------------- */
+
+pre.ascii-topo {
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--green);
+  line-height: 1.5;
+  white-space: pre;
+  text-shadow: 0 0 6px var(--green-glow);
+}
+pre.ascii-topo .leader { color: var(--white); font-weight: 700; }
+pre.ascii-topo .down   { color: var(--red); }
+
+/* ---- gauges & sparklines ------------------------------------------ */
+
+.gauges {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 14px 24px;
+}
+.gauge {
+  display: grid;
+  gap: 4px;
+}
+.gauge .label {
+  font-size: 9.5px;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--grey);
+}
+.gauge .value {
+  font-size: 24px;
+  font-weight: 700;
+  color: var(--green);
+  letter-spacing: -0.02em;
+  font-variant-numeric: tabular-nums;
+}
+.gauge .value.warn  { color: var(--amber); }
+.gauge .value.alert { color: var(--red); }
+.gauge .sub {
+  font-size: 11px;
+  color: var(--grey-2);
+}
+.gauge .bar {
+  height: 4px;
+  background: var(--bg-3);
+  position: relative;
+  overflow: hidden;
+}
+.gauge .bar > i {
+  position: absolute; top: 0; left: 0; bottom: 0;
+  background: linear-gradient(90deg, var(--green-dim), var(--green));
+  box-shadow: 0 0 6px var(--green-glow);
+}
+
+/* ---- log stream ---------------------------------------------------- */
+
+.log {
+  font-size: 11.5px;
+  color: var(--grey-2);
+  line-height: 1.55;
+}
+.log .line { display: grid; grid-template-columns: 70px 60px 1fr; gap: 8px; }
+.log .line .t   { color: var(--grey); }
+.log .line .lvl { letter-spacing: 0.18em; }
+.log .line .lvl.info { color: var(--cyan); }
+.log .line .lvl.warn { color: var(--amber); }
+.log .line .lvl.err  { color: var(--red); }
+.log .line .msg { color: var(--white); }
+.log .line .msg b { color: var(--green); font-weight: 600; }
+
+/* ---- status bar (last row) ---------------------------------------- */
+
+.statusbar {
+  background: var(--green);
+  color: var(--black);
+  display: flex;
+  align-items: center;
+  padding: 0 14px;
+  gap: 18px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.statusbar .right { margin-left: auto; display: flex; gap: 18px; }
+
+/* scrollbars */
+::-webkit-scrollbar { width: 6px; height: 6px; }
+::-webkit-scrollbar-thumb { background: var(--line-2); }
+::-webkit-scrollbar-thumb:hover { background: var(--green-dim); }

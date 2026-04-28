@@ -1,0 +1,11 @@
+bin/
+data/
+*.bolt
+*.gz
+.DS_Store
+node_modules/
+*.log
+*.test
+*.out
+.idea/
+.vscode/

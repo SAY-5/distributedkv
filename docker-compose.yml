@@ -1,0 +1,54 @@
+x-common: &common
+  build: .
+  restart: unless-stopped
+  networks: [dkv]
+  volumes:
+    - ./web:/srv/web:ro
+
+services:
+  n1:
+    <<: *common
+    container_name: dkv-n1
+    command: >
+      -id n1 -raft :7001 -http :8001 -data /srv/data -web /srv/web
+      -bootstrap
+      -peers      'n1=n1:7001,n2=n2:7001,n3=n3:7001'
+      -http-peers 'n1=n1:8001,n2=n2:8001,n3=n3:8001'
+    ports: ["8001:8001"]
+    volumes:
+      - ./web:/srv/web:ro
+      - n1data:/srv/data
+
+  n2:
+    <<: *common
+    container_name: dkv-n2
+    command: >
+      -id n2 -raft :7001 -http :8001 -data /srv/data -web /srv/web
+      -peers      'n1=n1:7001,n2=n2:7001,n3=n3:7001'
+      -http-peers 'n1=n1:8001,n2=n2:8001,n3=n3:8001'
+    ports: ["8002:8001"]
+    volumes:
+      - ./web:/srv/web:ro
+      - n2data:/srv/data
+    depends_on: [n1]
+
+  n3:
+    <<: *common
+    container_name: dkv-n3
+    command: >
+      -id n3 -raft :7001 -http :8001 -data /srv/data -web /srv/web
+      -peers      'n1=n1:7001,n2=n2:7001,n3=n3:7001'
+      -http-peers 'n1=n1:8001,n2=n2:8001,n3=n3:8001'
+    ports: ["8003:8001"]
+    volumes:
+      - ./web:/srv/web:ro
+      - n3data:/srv/data
+    depends_on: [n1]
+
+networks:
+  dkv:
+
+volumes:
+  n1data:
+  n2data:
+  n3data:
