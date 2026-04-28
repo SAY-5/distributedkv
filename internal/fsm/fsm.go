@@ -66,15 +66,21 @@ type KV struct {
 	data    map[string]Entry
 	version uint64 // global monotonic; applied count
 	now     func() time.Time
+	watch   *WatchManager
 }
 
 // New constructs an empty FSM.
 func New() *KV {
 	return &KV{
-		data: make(map[string]Entry),
-		now:  time.Now,
+		data:  make(map[string]Entry),
+		now:   time.Now,
+		watch: NewWatchManager(),
 	}
 }
+
+// Watch exposes the WatchManager so callers can Subscribe / inspect
+// /metrics counters. Returns nil only if the FSM is uninitialized.
+func (k *KV) Watch() *WatchManager { return k.watch }
 
 // SetClock is used in tests to make time deterministic.
 func (k *KV) SetClock(now func() time.Time) {
@@ -94,9 +100,31 @@ func (k *KV) Apply(log *raft.Log) any {
 	if err := json.Unmarshal(log.Data, &cmd); err != nil {
 		return ApplyResult{OK: false, Err: "bad command: " + err.Error()}
 	}
+	res := k.applyLocked(log, cmd)
+	// Notify watchers *outside* the FSM mutex (the publish path takes
+	// its own lock and can fan out to many subscribers; we don't want
+	// that on the apply critical path).
+	if r, ok := res.(ApplyResult); ok && r.OK && k.watch != nil {
+		k.watch.Publish(WatchEvent{
+			Kind:    cmd.Kind,
+			Key:     cmd.Key,
+			Value:   cmd.Value,
+			Version: r.NewVersion,
+			At:      k.now(),
+		})
+	}
+	return res
+}
+
+func (k *KV) applyLocked(log *raft.Log, cmd Command) any {
 	k.mu.Lock()
 	defer k.mu.Unlock()
-
+	// CAS is a tagging convenience for the log; it executes as a PUT
+	// with an explicit expected version. Rewrite once, before the
+	// switch, so a single code path handles both.
+	if cmd.Kind == OpCAS {
+		cmd.Kind = OpPut
+	}
 	now := k.now()
 	switch cmd.Kind {
 	case OpPut:
@@ -138,15 +166,6 @@ func (k *KV) Apply(log *raft.Log) any {
 		delete(k.data, cmd.Key)
 		k.version++
 		return ApplyResult{OK: true}
-
-	case OpCAS:
-		// CAS is just PUT with an explicit expected version; included
-		// as a separate kind for log-readability.
-		cmd.Kind = OpPut
-		k.mu.Unlock()
-		defer k.mu.Lock()
-		log.Data, _ = json.Marshal(cmd)
-		return k.Apply(log)
 
 	case OpTouch:
 		cur, exists := k.data[cmd.Key]

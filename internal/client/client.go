@@ -6,6 +6,7 @@
 package client
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -13,8 +14,19 @@ import (
 	"io"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 )
+
+// WatchEvent mirrors the server's published event shape — duplicated
+// here to keep the client a leaf module with no dependency on internal/fsm.
+type WatchEvent struct {
+	Kind    string `json:"kind"`
+	Key     string `json:"key"`
+	Value   []byte `json:"value,omitempty"`
+	Version uint64 `json:"version"`
+	At      string `json:"at"`
+}
 
 const (
 	defaultMaxRedirects = 4
@@ -149,6 +161,72 @@ func (c *Client) CAS(ctx context.Context, key string, expected uint64, value []b
 		return 0, r.ConflictVersion, nil
 	}
 	return 0, 0, c.readErr(resp)
+}
+
+// Watch streams write events for keys whose name begins with `prefix`.
+// Events are pushed onto out; the channel is closed when ctx is cancelled
+// or the server drops the subscriber. Returns the first endpoint that
+// answered the SSE handshake, plus an error if no endpoint did.
+//
+// The channel is buffered (cap=64); a slow consumer that doesn't read
+// will see the server side mark them as dropped and close the stream.
+func (c *Client) Watch(ctx context.Context, prefix string, out chan<- WatchEvent) error {
+	defer close(out)
+	hc := &http.Client{}  // separate client — no Timeout, since this is long-poll
+	for _, ep := range c.endpoints {
+		url := fmt.Sprintf("http://%s/v1/watch?prefix=%s", ep, prefix)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+		if err != nil {
+			return err
+		}
+		resp, err := hc.Do(req)
+		if err != nil {
+			continue  // try next endpoint
+		}
+		if resp.StatusCode != http.StatusOK {
+			_ = resp.Body.Close()
+			continue
+		}
+		// Parse the SSE stream. Frames are separated by "\n\n"; each
+		// frame has lines like "event: NAME" and "data: {...}".
+		defer resp.Body.Close()
+		return parseSSE(resp.Body, out)
+	}
+	return ErrNoEndpoints
+}
+
+func parseSSE(r io.Reader, out chan<- WatchEvent) error {
+	br := bufio.NewReaderSize(r, 64*1024)
+	var event, data string
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			if err == io.EOF {
+				return nil
+			}
+			return err
+		}
+		line = strings.TrimRight(line, "\r\n")
+		if line == "" {
+			// Frame boundary; emit if we have a payload.
+			if event != "" && data != "" && event != "hello" && event != "dropped" {
+				var e WatchEvent
+				if err := json.Unmarshal([]byte(data), &e); err == nil {
+					out <- e
+				}
+			}
+			event, data = "", ""
+			continue
+		}
+		if strings.HasPrefix(line, ":") {
+			continue  // heartbeat / comment
+		}
+		if strings.HasPrefix(line, "event:") {
+			event = strings.TrimSpace(line[6:])
+		} else if strings.HasPrefix(line, "data:") {
+			data = strings.TrimSpace(line[5:])
+		}
+	}
 }
 
 // ClusterInfo returns the cluster topology + leader.

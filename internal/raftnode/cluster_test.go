@@ -282,6 +282,71 @@ func TestStaleReadFromFollower(t *testing.T) {
 	}
 }
 
+func TestWatchStreamsAcrossReplicas(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping cluster test in -short mode")
+	}
+	addrs := []string{freeAddr(t), freeAddr(t), freeAddr(t)}
+	httpAddrs := []string{freeAddr(t), freeAddr(t), freeAddr(t)}
+	peers := []raft.Server{
+		{ID: "n1", Address: raft.ServerAddress(addrs[0])},
+		{ID: "n2", Address: raft.ServerAddress(addrs[1])},
+		{ID: "n3", Address: raft.ServerAddress(addrs[2])},
+	}
+	httpPeers := map[string]string{"n1": httpAddrs[0], "n2": httpAddrs[1], "n3": httpAddrs[2]}
+	n1 := startNode(t, "n1", peers, httpPeers, true)
+	n2 := startNode(t, "n2", peers, httpPeers, false)
+	n3 := startNode(t, "n3", peers, httpPeers, false)
+	_ = waitForLeader(t, []*testNode{n1, n2, n3}, 8*time.Second)
+
+	// Subscribe a follower (any node serves watches; we pick n2 to
+	// prove follower-side streaming works).
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cli := client.New(n2.httpAddr)
+	events := make(chan client.WatchEvent, 8)
+	go func() { _ = cli.Watch(ctx, "watched:", events) }()
+	// Brief pause so the SSE handshake completes before we write.
+	time.Sleep(150 * time.Millisecond)
+
+	// Drive writes through the cluster (will be applied on every replica).
+	w := client.New(httpAddrs...)
+	wctx, wcancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer wcancel()
+	for i := 0; i < 3; i++ {
+		key := fmt.Sprintf("watched:k%d", i)
+		if _, err := w.Put(wctx, key, []byte("v")); err != nil {
+			t.Fatalf("put: %v", err)
+		}
+	}
+	// And one event that the prefix filter should drop.
+	if _, err := w.Put(wctx, "other:a", []byte("v")); err != nil {
+		t.Fatalf("put other: %v", err)
+	}
+
+	// Collect 3 watched: events; assert no `other:` event leaked.
+	got := []client.WatchEvent{}
+	deadline := time.After(3 * time.Second)
+	for len(got) < 3 {
+		select {
+		case e := <-events:
+			if !strings.HasPrefix(e.Key, "watched:") {
+				t.Fatalf("prefix filter leaked: %s", e.Key)
+			}
+			got = append(got, e)
+		case <-deadline:
+			t.Fatalf("only got %d events: %v", len(got), got)
+		}
+	}
+	// Versions are monotone within a key; here all keys are distinct
+	// so each Version should be 1.
+	for _, e := range got {
+		if e.Version != 1 {
+			t.Fatalf("expected version 1 got %d (key %s)", e.Version, e.Key)
+		}
+	}
+}
+
 func TestClusterInfoExposesTopology(t *testing.T) {
 	if testing.Short() {
 		t.Skip("skipping cluster test in -short mode")

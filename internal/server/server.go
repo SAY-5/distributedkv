@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -75,6 +76,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("/v1/kv/", s.handleKV)
 	mux.HandleFunc("/v1/stats", s.handleStats)
 	mux.HandleFunc("/metrics", s.handleMetrics)
+	mux.HandleFunc("/v1/watch", s.handleWatch)
 	if s.WebDir != "" {
 		mux.Handle("/", http.FileServer(http.Dir(s.WebDir)))
 	}
@@ -290,6 +292,66 @@ func (s *Server) applyAndRespond(w http.ResponseWriter, cmd fsm.Command) {
 	})
 }
 
+// handleWatch streams write events as SSE. Subscriber filters by the
+// `prefix` query param (default "" = all keys). The connection holds
+// open until the client disconnects or the request context cancels.
+//
+// Followers serve watches too — events are FSM-local, applied on every
+// replica after Raft commits. Reading from a follower means slightly
+// more lag (commit-to-apply) but doesn't require leader contact.
+func (s *Server) handleWatch(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, errors.New("streaming unsupported"))
+		return
+	}
+	prefix := r.URL.Query().Get("prefix")
+	sub := s.FSM.Watch().Subscribe(prefix, 64)
+	defer sub.Close()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("X-Accel-Buffering", "no")
+	w.WriteHeader(http.StatusOK)
+
+	// Initial hello — proves to the client the subscription is live.
+	_, _ = fmt.Fprintf(w, "event: hello\ndata: {\"prefix\":%q,\"applied\":%d}\n\n",
+		prefix, s.FSM.Version())
+	flusher.Flush()
+
+	// Heartbeat every 25s so dead connections get reaped through proxies.
+	heartbeat := time.NewTicker(25 * time.Second)
+	defer heartbeat.Stop()
+
+	ctx := r.Context()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-heartbeat.C:
+			if _, err := fmt.Fprint(w, ": heartbeat\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		case ev, alive := <-sub.C:
+			if !alive {
+				_, _ = fmt.Fprint(w, "event: dropped\ndata: {}\n\n")
+				flusher.Flush()
+				return
+			}
+			data, err := json.Marshal(ev)
+			if err != nil {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n",
+				strings.ToLower(string(ev.Kind)), data); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
 func (s *Server) handleStats(w http.ResponseWriter, _ *http.Request) {
 	s.mu.Lock()
 	cp := append([]float64(nil), s.latencies...)
@@ -315,6 +377,8 @@ func (s *Server) handleMetrics(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4")
 	rs := s.Node.Raft.Stats()
 	fmt.Fprintf(w, "# HELP dkv_keys live key count\n# TYPE dkv_keys gauge\ndkv_keys %d\n", s.FSM.Len())
+	fmt.Fprintf(w, "# HELP dkv_watch_subscribers active SSE watchers\n# TYPE dkv_watch_subscribers gauge\ndkv_watch_subscribers %d\n", s.FSM.Watch().SubCount())
+	fmt.Fprintf(w, "# HELP dkv_watch_dropped_total subscribers dropped (slow consumer)\n# TYPE dkv_watch_dropped_total counter\ndkv_watch_dropped_total %d\n", s.FSM.Watch().Dropped())
 	fmt.Fprintf(w, "# HELP dkv_applied_index FSM apply counter\n# TYPE dkv_applied_index counter\ndkv_applied_index %d\n", s.FSM.Version())
 	fmt.Fprintf(w, "# HELP dkv_raft_state 1 if leader, else 0\n# TYPE dkv_raft_state gauge\ndkv_raft_state %d\n", boolToInt(s.Node.State() == "Leader"))
 	for k, v := range rs {
